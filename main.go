@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,11 +26,7 @@ type LokiStream struct {
 	Values [][]string        `json:"values"`
 }
 
-// change the values according to your environment
 const (
-	openSearchURL   = "http://localhost:9200"
-	lokiPushURL     = "http://localhost:3100/loki/api/v1/push"
-	openSearchIndex = "graylog_0"
 	scrollBatchSize = 1000
 )
 
@@ -45,7 +43,40 @@ func init() {
 }
 
 func main() {
+	var openSearchURL string
+	var lokiPushURL string
+	var openSearchIndex string
+	for _, arg := range os.Args[1:] {
+		if matched, _ := regexp.MatchString(`^--output=(.+)`, arg); matched {
+			re := regexp.MustCompile(`^--output=(.+)`)
+			matches := re.FindStringSubmatch(arg)
+			if len(matches) > 1 {
+				lokiPushURL = matches[1]
+			}
+		} else if matched, _ := regexp.MatchString(`^--input=(.+)`, arg); matched {
+			re := regexp.MustCompile(`^--input=(.+)`)
+			matches := re.FindStringSubmatch(arg)
+			if len(matches) > 1 {
+				openSearchURL = matches[1]
+			}
+
+		} else if matched, _ := regexp.MatchString(`^--index=(.+)`, arg); matched {
+			re := regexp.MustCompile(`^--index=(.+)`)
+			matches := re.FindStringSubmatch(arg)
+			if len(matches) > 1 {
+				openSearchIndex = matches[1]
+			}
+		} else if strings.HasPrefix(arg, "-") {
+			fmt.Printf("Error: Unknown argument: %s\n", arg)
+			return
+		} else {
+			fmt.Println("Error: wrong format")
+			return
+		}
+	}
+
 	osClient, err := opensearch.NewClient(opensearch.Config{
+
 		Addresses: []string{openSearchURL},
 	})
 	if err != nil {
@@ -56,7 +87,7 @@ func main() {
 	log.Printf("Starting to query logs from OpenSearch index: %s", openSearchIndex)
 	processedCount := 0
 	err = queryAndPushLogs(osClient, openSearchIndex, func(logDoc map[string]interface{}) error {
-		if err := pushLogToLoki(lokiPushURL, logDoc); err != nil {
+		if err := pushLogToLoki(lokiPushURL, logDoc, openSearchIndex); err != nil {
 			return fmt.Errorf("failed to push log to Loki: %w", err)
 		}
 		processedCount++
@@ -167,7 +198,7 @@ func queryAndPushLogs(osClient *opensearch.Client, index string, callback func(l
 	return nil
 }
 
-func pushLogToLoki(lokiURL string, logDoc map[string]interface{}) error {
+func pushLogToLoki(lokiURL string, logDoc map[string]interface{}, openSearchIndex string) error {
 	timestampStr, ok := logDoc["timestamp"].(string)
 	if !ok {
 		return fmt.Errorf("log document missing or invalid 'timestamp' field: %v", logDoc)
