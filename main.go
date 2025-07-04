@@ -208,6 +208,7 @@ func pushLogToLoki(lokiURL string, logDoc map[string]interface{}, openSearchInde
 	// Your timestamp is "2024-02-14 20:30:55.410". This looks like a custom format,
 	// or time.RFC3339Nano might not exactly match the space and 3 decimal places.
 	// Let's adjust the parsing format to match "2006-01-02 15:04:05.000" (Go's reference time format)
+	// https://www.rfc-editor.org/rfc/rfc3339
 	const graylogTimestampFormat = "2006-01-02 15:04:05.000"
 	t, err := time.Parse(graylogTimestampFormat, timestampStr)
 	if err != nil {
