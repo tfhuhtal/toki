@@ -131,7 +131,7 @@ func queryAndPushLogsParallel(osClient *opensearch.Client, index, lokiPushURL st
 			"match_all": map[string]interface{}{},
 		},
 		"sort": []map[string]string{
-			{"_doc": "asc"},
+			{"_doc": "desc"},
 		},
 	}
 	var buf bytes.Buffer
