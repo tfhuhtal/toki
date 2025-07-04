@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opensearch-project/opensearch-go"
@@ -76,7 +77,6 @@ func main() {
 	}
 
 	osClient, err := opensearch.NewClient(opensearch.Config{
-
 		Addresses: []string{openSearchURL},
 	})
 	if err != nil {
@@ -85,24 +85,32 @@ func main() {
 	fmt.Println("Connected to OpenSearch.")
 
 	log.Printf("Starting to query logs from OpenSearch index: %s", openSearchIndex)
-	processedCount := 0
-	err = queryAndPushLogs(osClient, openSearchIndex, func(logDoc map[string]interface{}) error {
-		if err := pushLogToLoki(lokiPushURL, logDoc, openSearchIndex); err != nil {
-			return fmt.Errorf("failed to push log to Loki: %w", err)
-		}
-		processedCount++
-		return nil
-	})
-
+	const workerCount = 8
+	err = queryAndPushLogsParallel(osClient, openSearchIndex, lokiPushURL, workerCount)
 	if err != nil {
 		log.Fatalf("Error during log transfer: %v", err)
 	}
-	log.Printf("Finished. Successfully processed %d logs from OpenSearch to Loki.", processedCount)
 }
 
-func queryAndPushLogs(osClient *opensearch.Client, index string, callback func(logDoc map[string]interface{}) error) error {
+func queryAndPushLogsParallel(osClient *opensearch.Client, index, lokiPushURL string, workerCount int) error {
 	ctx := context.Background()
 	var scrollID string
+
+	docChan := make(chan map[string]interface{}, scrollBatchSize)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for logDoc := range docChan {
+				if err := pushLogToLoki(lokiPushURL, logDoc, index); err != nil {
+					log.Printf("failed to push log to Loki: %v", err)
+				}
+			}
+		}()
+	}
+
 	defer func() {
 		if scrollID != "" {
 			log.Printf("Clearing OpenSearch scroll ID: %s", scrollID)
@@ -146,6 +154,8 @@ func queryAndPushLogs(osClient *opensearch.Client, index string, callback func(l
 		return fmt.Errorf("error performing initial OpenSearch search: %w", err)
 	}
 
+	processedCount := 0
+
 	for {
 		if res.IsError() {
 			var e map[string]interface{}
@@ -180,9 +190,8 @@ func queryAndPushLogs(osClient *opensearch.Client, index string, callback func(l
 				log.Printf("Warning: Could not parse _source from hit: %v", hit)
 				continue
 			}
-			if err := callback(doc); err != nil {
-				return fmt.Errorf("callback failed for document: %w", err)
-			}
+			processedCount++
+			docChan <- doc
 		}
 
 		scrollReq := opensearchapi.ScrollRequest{
@@ -195,6 +204,9 @@ func queryAndPushLogs(osClient *opensearch.Client, index string, callback func(l
 		}
 	}
 
+	close(docChan)
+	wg.Wait()
+	log.Printf("Finished. Successfully processed %d logs from OpenSearch to Loki.", processedCount)
 	return nil
 }
 
@@ -204,15 +216,9 @@ func pushLogToLoki(lokiURL string, logDoc map[string]interface{}, openSearchInde
 		return fmt.Errorf("log document missing or invalid 'timestamp' field: %v", logDoc)
 	}
 
-	// Parse the timestamp. Graylog/OpenSearch often use RFC3339 or similar.
-	// Your timestamp is "2024-02-14 20:30:55.410". This looks like a custom format,
-	// or time.RFC3339Nano might not exactly match the space and 3 decimal places.
-	// Let's adjust the parsing format to match "2006-01-02 15:04:05.000" (Go's reference time format)
-	// https://www.rfc-editor.org/rfc/rfc3339
 	const graylogTimestampFormat = "2006-01-02 15:04:05.000"
 	t, err := time.Parse(graylogTimestampFormat, timestampStr)
 	if err != nil {
-		// If the specific format doesn't work, try RFC3339Nano as a fallback or a more flexible parser
 		parsedTime, parseErr := time.Parse(time.RFC3339Nano, timestampStr)
 		if parseErr != nil {
 			return fmt.Errorf("failed to parse timestamp '%s' with both custom format and RFC3339Nano: %w", timestampStr, parseErr)
