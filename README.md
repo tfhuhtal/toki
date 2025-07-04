@@ -22,3 +22,5 @@ Run the tool
 ```bash
 go run main.go --output=<your_loki_url>/loki/api/v1/push --input=<your_opensearch_url> --index=<your_opensearch_index>
 ```
+
+
